@@ -65,7 +65,7 @@ SETTLEMENT_COLORS = ["#f43c45", "#5b8cff", "#c9c9c9", "#7600A5"]
 
 # VARIABLE TO CHANGE THE MAX NUMBER OF SETTLEMENTS (prefer either 2 or 4 depending on 1 or two players)
 
-MAX_SETTLEMENTS = 4
+MAX_SETTLEMENTS = 5
 
 
 
@@ -149,7 +149,7 @@ def generate_vertex_map():
                 vertex_to_hexes.setdefault(vertex_id, [])               # Create an empty list for the vertex ID if not seen before
                 if hex_position not in vertex_to_hexes[vertex_id]:
                     vertex_to_hexes[vertex_id].append(hex_position)
- 
+
     return vertex_to_hexes, hex_to_vertices, vertex_id_to_coordinate
 
 
@@ -182,6 +182,7 @@ def Settlement_Analysis(settlements, board, vertex_to_hexes):
         for hex_position in vertex_to_hexes.get(vertex_id, []):
             observed.add(hex_position)
     unique_pips = sum(board[hex_position]["Pips"] for hex_position in observed)
+    print("unique pips:", unique_pips)
     resources   = set(board[hex_position]["Resource"] for hex_position in observed if board[hex_position]["Resource"] != "Desert")
  
     return per_settlement, unique_pips, resources
@@ -197,39 +198,172 @@ def Settlement_Analysis(settlements, board, vertex_to_hexes):
 # TODO Fitness Function
 # ===========================
 
+def fitness(individual, board, vertex_to_hexes):
+    """
+    Tallies the number of pips associated with tiles located near each settlement
+    placement in an individual.
+    """
 
+
+    score = 0
+    visited_hexes = set()
+
+    for vertex in individual:
+
+        for hex_pos in vertex_to_hexes.get(vertex, []):
+
+            if hex_pos not in visited_hexes:
+                score += board[hex_pos]["Pips"]
+                visited_hexes.add(hex_pos)
+
+    return score
 
 # ===========================
 # TODO Evolutionary Algorithm
 # ===========================
 
+def initialize_population(pop_size, vertices):
+    """
+    Initializes a population of groups of 5 random vertices from the board
+    """
 
+    population = []
+
+    while len(population) < pop_size:
+
+        candidate = random.sample(vertices, 5)
+
+        #if valid_settlement(candidate):
+        population.append(candidate)
+    print(population, "\n")
+    print(len(population))
+    return population
+
+
+def evolutionary_algorithm(board, vertex_to_hexes, vertices,
+                           pop_size=50, generations=200,
+                           mutation_rate=0.1, tournament_k=2):
+
+    """
+    Runs the tournament with fitness rankings of the population
+    """
+    population = initialize_population(pop_size, vertices)
+
+    best_individual = None
+    best_fitness = -float("inf")
+
+    for g in range(generations):
+
+        fitnesses = [
+            fitness(ind, board, vertex_to_hexes)
+            for ind in population
+        ]
+
+        # track best individual
+        gen_best_index = fitnesses.index(max(fitnesses))
+        if fitnesses[gen_best_index] > best_fitness:
+            best_fitness = fitnesses[gen_best_index]
+            best_individual = population[gen_best_index][:]
+
+        # produce offspring
+        parent1 = tournament_selection(population, fitnesses, tournament_k)
+        parent2 = tournament_selection(population, fitnesses, tournament_k)
+
+        child1, child2 = crossover(parent1, parent2)
+
+        child1 = mutate(child1, vertices, mutation_rate)
+        child2 = mutate(child2, vertices, mutation_rate)
+
+        child1_fit = fitness(child1, board, vertex_to_hexes)
+        child2_fit = fitness(child2, board, vertex_to_hexes)
+
+        # replace the worst individuals
+        worst_indices = sorted(
+            range(len(fitnesses)),
+            key=lambda i: fitnesses[i]
+        )[:2]
+
+        if child1_fit > fitnesses[worst_indices[0]]:
+            population[worst_indices[0]] = child1
+            fitnesses[worst_indices[0]] = child1_fit
+
+        if child2_fit > fitnesses[worst_indices[1]]:
+            population[worst_indices[1]] = child2
+            fitnesses[worst_indices[1]] = child2_fit
+
+    return best_individual, best_fitness
 
 
 # =========================
 # TODO Tournament Selection
 # =========================
 
+def tournament_selection(population, fitnesses, k):
 
+    """
+    Returns most fit individual from a randomly selected sample
+    """
+    competitors = random.sample(range(len(population)), k)
+
+    best = competitors[0]
+
+    for c in competitors:
+        if fitnesses[c] > fitnesses[best]:
+            best = c
+
+    return population[best][:]
 
 # ==================
 # TODO Recombination
 # ==================
 
+def crossover(parent1, parent2):
 
+    """
+    Performs one-point crossover mutation on an individual
+    """
+    cut = random.randint(1, 3)
+
+    child1 = parent1[:cut] + parent2[cut:]
+    child2 = parent2[:cut] + parent1[cut:]
+
+    child1 = repair(child1, parent1, parent2)
+    child2 = repair(child2, parent1, parent2)
+
+    return child1, child2
+
+def repair(child, parent1, parent2):
+    """
+    removes duplicates from the individual
+    """
+
+    child = list(dict.fromkeys(child))
+
+    pool = list(set(parent1 + parent2))
+
+    while len(child) < 5:
+        v = random.choice(pool)
+        if v not in child:
+            child.append(v)
+
+    return child
 
 # =============
 # TODO Mutation
 # =============
 
+def mutate(individual, vertices, rate=0.1):
+    """
+    Replaces one settlement (genome) in an individual with another random one
+    """
 
+    if random.random() < rate:
+        i = random.randint(0, len(individual)-1)
+        new_vertex = random.choice(vertices)
 
+        individual[i] = new_vertex
 
-
-
-
-
-
+    return individual
 
 
 # ==============
@@ -461,7 +595,7 @@ def main():
     }
  
     vertex_to_hexes, hex_to_vertices, vertex_id_to_coordinate = generate_vertex_map()
- 
+
     # Set up the figure with three panels:
     # left column  — board (spans both rows)
     # top right    — settlement analysis
@@ -546,7 +680,19 @@ def main():
             program_state["Settlements"] = []
             print("Settlements cleared.")
             refresh_display()
-    # We can add later a key bind 'e' where the EA runns manually
+        elif key_event.key == 'e':
+            vertices = list(vertex_to_hexes.keys())
+
+            best, score = evolutionary_algorithm(
+                program_state["Board"],
+                vertex_to_hexes,
+                vertices
+            )
+
+            print("Best settlements:", best)
+            print("Unique Pips:", score)
+
+    # We can add later a key bind 'e' where the EA runs manually
     #
     #
     #
