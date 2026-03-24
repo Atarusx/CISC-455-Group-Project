@@ -1,16 +1,15 @@
 """
-Random Interactive Catan Board Placer
+Random Interactive Catan Board Placer — Competitive EA
 
-The following code generates a random Catan board
-You are able the click on any vertex on the board to place a settlement
-You can place from 2 to 4 settlements or change the value (MAX_SETTLEMENTS) in the code
-There is a 'pip' analysis panel that indicates how many pips your settlement achieves
+EA uses indirect encoding: individuals are weight vectors over vertex features.
+The evolved strategy is board-agnostic and competes against a random opponent
+using alternating placement (EA → opponent → EA → opponent).
 
-How to use:
-Press 'r' to generate a new random board
-Press 'c' to clear the settlements on the board
-Right click with mouse on a hexagonal corner dot to place the settlement
-- Settlements cannot be placed adjacent to each other
+Controls:
+  'r'  — new random board
+  'c'  — clear settlements
+  'e'  — run Evolutionary Algorithm
+  'f'  — cycle fitness mode  (difference | ratio | absolute)
 """
 
 import math
@@ -19,548 +18,822 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 
 # =============================
-# Important Board Variable Data
+# Board Data
 # =============================
 
 PIPS = {2:1, 3:2, 4:3, 5:4, 6:5, 8:5, 9:4, 10:3, 11:2, 12:1}
 
-LAND_HEXES = (["Forest"] * 4 + ["Pasture"] * 4 + ["Field"] * 4 + ["Hills"] * 3 + ["Mountains"] * 3 + ["Desert"] * 1)
+LAND_HEXES = (["Forest"] * 4 + ["Pasture"] * 4 + ["Field"] * 4 +
+              ["Hills"] * 3 + ["Mountains"] * 3 + ["Desert"] * 1)
 
 TOKEN_VALUES = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12]
 
-
-
-# This makes the shape of the board and gives positions for each row to place the hexes
 LAND_HEX_LAYOUT = [
-                    [(0,0),(0,1),(0,2)],                    # row 1 has 3 hexes
-                    [(1,0),(1,1),(1,2),(1,3)],              # row 2 has 4 hexes
-                    [(2,0),(2,1),(2,2),(2,3),(2,4)],        # row 3 has 5 hexes
-                    [(3,0),(3,1),(3,2),(3,3)],              # row 4 has 4 hexes
-                    [(4,0),(4,1),(4,2)]                     # row 5 has 3 hexes
+    [(0,0),(0,1),(0,2)],
+    [(1,0),(1,1),(1,2),(1,3)],
+    [(2,0),(2,1),(2,2),(2,3),(2,4)],
+    [(3,0),(3,1),(3,2),(3,3)],
+    [(4,0),(4,1),(4,2)],
 ]
-
-LAND_HEX_INDEX = [hex for row in LAND_HEX_LAYOUT for hex in row]
-
+LAND_HEX_INDEX = [h for row in LAND_HEX_LAYOUT for h in row]
 
 RESOURCE_COLORS = {
-    "Forest" : "#00af00",
-    "Pasture" : "#03f500",
-    "Field" : "#ffda00",
-    "Hills" : "#b04a1a",
-    "Mountains" : "#888888",
-    "Desert" : "#ccba6a",
+    "Forest":"#00af00","Pasture":"#03f500","Field":"#ffda00",
+    "Hills":"#b04a1a","Mountains":"#888888","Desert":"#ccba6a",
 }
-
-RESOURCE_NAMES = {
-    "Forest" : "Forest",
-    "Pasture" : "Pasture",
-    "Field" : "Field",
-    "Hills" : "Hills",
-    "Mountains" : "Mountains",
-    "Desert" : "Desert",
-}
-
+RESOURCE_NAMES = {k: k for k in RESOURCE_COLORS}
 SETTLEMENT_COLORS = ["#f43c45", "#5b8cff", "#c9c9c9", "#7600A5"]
 
+MAX_SETTLEMENTS = 2      # settlements per player
 
-# VARIABLE TO CHANGE THE MAX NUMBER OF SETTLEMENTS (prefer either 2 or 4 depending on 1 or two players)
+# =============================
+# EA Hyperparameters
+# =============================
 
-MAX_SETTLEMENTS = 4
+EA_POP_SIZE       = 60
+EA_GENERATIONS    = 100
+EA_NUM_BOARDS     = 30   # training boards per fitness evaluation
+EA_MUTATION_SIGMA = 0.15
+EA_TEST_BOARDS    = 100  # fresh boards for final comparison plot
 
+# =============================
+# Fitness Mode  (cycle with 'f')
+# =============================
+# "difference" : EA_pips - opponent_pips
+# "ratio"      : EA_pips / (EA_pips + opponent_pips)
+# "absolute"   : EA_pips  (ignores opponent)
 
+FITNESS_MODES = ["difference", "ratio", "absolute"]
+_fitness_mode = [0]   # mutable index
 
-
-
-
+def current_fitness_mode():
+    return FITNESS_MODES[_fitness_mode[0]]
 
 
 # =============================
-# Random Catan Board Generation
+# Board Generation
 # =============================
 
 def generate_board():
-    tiles = LAND_HEXES[:]
+    tiles  = LAND_HEXES[:]
     random.shuffle(tiles)
     tokens = TOKEN_VALUES[:]
     random.shuffle(tokens)
-    board = {}
-    token_index = 0
-    for hex_position, resource in zip(LAND_HEX_INDEX, tiles):
-        if resource == "Desert":
-            board[hex_position] = {"Resource": resource, "Token": None, "Pips": 0}
+    board  = {}
+    ti     = 0
+    for pos, res in zip(LAND_HEX_INDEX, tiles):
+        if res == "Desert":
+            board[pos] = {"Resource": res, "Token": None, "Pips": 0}
         else:
-            t = tokens[token_index]; token_index += 1
-            board[hex_position] = {"Resource": resource, "Token": t, "Pips": PIPS[t]}
+            t = tokens[ti]; ti += 1
+            board[pos] = {"Resource": res, "Token": t, "Pips": PIPS[t]}
     return board
 
 
-
-
-
-
-
-
-
-# ================
-# Land Hex Drawing
-# ================
-
+# =============================
+# Geometry
+# =============================
 
 LAND_HEX_SIZE = 1.0
-ROW_OFFSET = [1.0, 0.5, 0.0, 0.5, 1.0]
+ROW_OFFSET    = [1.0, 0.5, 0.0, 0.5, 1.0]
 
-def land_hex_center(row, column):
-    x = column * math.sqrt(3) * LAND_HEX_SIZE + ROW_OFFSET[row] * math.sqrt(3) * LAND_HEX_SIZE
+def land_hex_center(row, col):
+    x = col * math.sqrt(3) * LAND_HEX_SIZE + ROW_OFFSET[row] * math.sqrt(3) * LAND_HEX_SIZE
     y = -row * 1.5 * LAND_HEX_SIZE
     return x, y
 
-def land_hex_verticies(cx, cy):
-    points = []
-    for i in range(6):
-        angle = math.radians(60 * i - 30)
-        points.append((cx + LAND_HEX_SIZE * math.cos(angle),
-                    cy + LAND_HEX_SIZE * math.sin(angle)))
-    return points
-
-
+def land_hex_vertices(cx, cy):
+    return [(cx + LAND_HEX_SIZE * math.cos(math.radians(60*i - 30)),
+             cy + LAND_HEX_SIZE * math.sin(math.radians(60*i - 30))) for i in range(6)]
 
 def generate_vertex_map():
-    coordinate_to_vertex_id = {}                # Maps board coordinate to vertex id
-    vertex_id_to_coordinate = {}                # Maps vertex id to coordinate on board
-    vertex_to_hexes = {}                        # List of hex positions touching the hex
-    hex_to_vertices = {}                        # Maps hex position to its 6 vertex id's
-    counter = [0]                               
+    coord_to_id = {}
+    id_to_coord = {}
+    vtx_to_hex  = {}
+    hex_to_vtx  = {}
+    ctr = [0]
 
-    def get_vertex_id(x, y):
+    def get_id(x, y):
         key = (round(x, 4), round(y, 4))
-        if key not in coordinate_to_vertex_id:
-            coordinate_to_vertex_id[key] = counter[0]                   # Assign unique ID
-            vertex_id_to_coordinate[counter[0]] = (x, y)                # Store vertex position
-            counter[0] += 1                 
-        return coordinate_to_vertex_id[key]
- 
+        if key not in coord_to_id:
+            coord_to_id[key] = ctr[0]
+            id_to_coord[ctr[0]] = (x, y)
+            ctr[0] += 1
+        return coord_to_id[key]
+
     for r, row in enumerate(LAND_HEX_LAYOUT):
-        for c, hex_position in enumerate(row):
+        for c, pos in enumerate(row):
             cx, cy = land_hex_center(r, c)
-            hex_to_vertices[hex_position] = []
-            for (vx, vy) in land_hex_verticies(cx, cy):
-                vertex_id = get_vertex_id(vx, vy)
-                hex_to_vertices[hex_position].append(vertex_id)         # Store vertex id to hex
-                vertex_to_hexes.setdefault(vertex_id, [])               # Create an empty list for the vertex ID if not seen before
-                if hex_position not in vertex_to_hexes[vertex_id]:
-                    vertex_to_hexes[vertex_id].append(hex_position)
- 
-    return vertex_to_hexes, hex_to_vertices, vertex_id_to_coordinate
+            hex_to_vtx[pos] = []
+            for vx, vy in land_hex_vertices(cx, cy):
+                vid = get_id(vx, vy)
+                hex_to_vtx[pos].append(vid)
+                vtx_to_hex.setdefault(vid, [])
+                if pos not in vtx_to_hex[vid]:
+                    vtx_to_hex[vid].append(pos)
+
+    return vtx_to_hex, hex_to_vtx, id_to_coord
 
 
+# =============================
+# Settlement Analysis
+# =============================
+
+def pip_color(p):
+    return {5:"#e84040",4:"#f4a93c",3:"#f4e040",2:"#7ec8f4",1:"#aaaaaa",0:"#555555"}.get(p,"#555555")
+
+def settlement_analysis(settlements, board, vtx_to_hex):
+    per = []
+    for vid in settlements:
+        hexes = vtx_to_hex.get(vid, [])
+        sub   = sum(board[h]["Pips"] for h in hexes)
+        tiles = [(board[h]["Resource"], board[h]["Token"], board[h]["Pips"]) for h in hexes]
+        per.append({"Vertex ID": vid, "Subtotal of Pips": sub, "Tiles": tiles})
+    total_pips = sum(
+        sum(board[h]["Pips"] for h in vtx_to_hex.get(vid, []))
+        for vid in settlements
+    )
+    observed  = {h for vid in settlements for h in vtx_to_hex.get(vid, [])}
+    resources = {board[h]["Resource"] for h in observed if board[h]["Resource"] != "Desert"}
+    return per, total_pips, resources
 
 
+# =============================
+# Vertex Features  (indirect encoding)
+# =============================
+#
+# Each vertex → 13 normalised features:
+#   pip_sum           - total pip of adjacent tiles
+#   max_pip           - highest pip among tiles
+#   count_high        - number of 6s and 8s
+#   num_hexes         - number of adjacent tiles
+#   resource_variety  - number of different resources
+#   pip_variance      - variance of pip numbers
+#   min_pip           - smallest pip
+#   isolation         - number of valid empty adjacent vertices (expansion space)
+#   has_wood          - touches a Forest tile (1/0)
+#   has_brick         - touches a Hills tile (1/0)
+#   has_scarce        - touches a scarce resource (Hills or Mountains) (1/0)
+#   is_edge_vertex    - on the edge/corner of the board, num_hexes < 3 (1/0)
+#   neighbor_opponents- number of nearby opponent settlements
 
+FEATURE_MAX = [15.0, 5.0, 3.0, 3.0, 3.0, 6.25, 5.0, 6.0, 1.0, 1.0, 1.0, 1.0, 2.0]
+NUM_WEIGHTS  = 13
 
+SCARCE_RESOURCES = {"Hills", "Mountains"}   # only 3 tiles each vs 4 for others
 
+def vertex_features(vid, board, vtx_to_hex, hex_to_vtx=None, placed=None, opponent_placed=None):
+    hexes     = vtx_to_hex.get(vid, [])
+    pips      = [board[h]["Pips"] for h in hexes]
+    res_list  = [board[h]["Resource"] for h in hexes]
 
+    pip_sum          = sum(pips)
+    max_pip          = max(pips) if pips else 0
+    min_pip          = min(pips) if pips else 0
+    count_high       = sum(1 for p in pips if p >= 5)
+    num_hexes        = len(hexes)
+    resource_variety = len({r for r in res_list if r != "Desert"})
 
-
-# ===============
-# Pip Identifiers
-# ===============
-
-def pip_color(pips):
-    return {5:"#e84040", 4:"#f4a93c", 3:"#f4e040", 2:"#7ec8f4", 1:"#aaaaaa", 0:"#555555"}.get(pips, "#555555")
-
-def Settlement_Analysis(settlements, board, vertex_to_hexes):
-    per_settlement = []
-    for vertex_id in settlements:
-        hexes = vertex_to_hexes.get(vertex_id, [])
-        subTotal_pips = sum(board[hex_position]["Pips"] for hex_position in hexes)
-        tiles = [(board[hex_position]["Resource"], board[hex_position]["Token"], board[hex_position]["Pips"]) for hex_position in hexes]
-        per_settlement.append({"Vertex ID": vertex_id, "Subtotal of Pips": subTotal_pips, "Tiles": tiles})
- 
-    # Unique pip total
-    observed = set()
-    for vertex_id in settlements:
-        for hex_position in vertex_to_hexes.get(vertex_id, []):
-            observed.add(hex_position)
-    unique_pips = sum(board[hex_position]["Pips"] for hex_position in observed)
-    resources   = set(board[hex_position]["Resource"] for hex_position in observed if board[hex_position]["Resource"] != "Desert")
- 
-    return per_settlement, unique_pips, resources
-
-
-
-
-
-
-
-
-# ===========================
-# TODO Fitness Function
-# ===========================
-
-
-
-# ===========================
-# TODO Evolutionary Algorithm
-# ===========================
-
-
-
-
-# =========================
-# TODO Tournament Selection
-# =========================
-
-
-
-# ==================
-# TODO Recombination
-# ==================
-
-
-
-# =============
-# TODO Mutation
-# =============
-
-
-
-
-
-
-
-
-
-
-
-# ==============
-# Visualizer Tab
-# ==============
-
-def draw_board(board_axes, board, vertex_id_to_coordinate, settlements):
-    """Draw the hex board, number tokens, vertex dots, and settlement markers."""
-    board_axes.cla()
-    board_axes.set_facecolor("#0f1117")
-    board_axes.set_aspect("equal")
-    board_axes.axis("off")
- 
-    # Title changes depending on how many settlements have been placed
-    number_placed = len(settlements)
-    if number_placed < MAX_SETTLEMENTS:
-        title_text = f"Click a vertex to place settlement {number_placed + 1} of {MAX_SETTLEMENTS}"
+    # pip variance
+    if len(pips) > 1:
+        mean     = pip_sum / len(pips)
+        variance = sum((p - mean) ** 2 for p in pips) / len(pips)
     else:
-        title_text = f"All {MAX_SETTLEMENTS} settlements placed  |  Press 'c' to clear"
-    board_axes.set_title(title_text, fontsize=11, color="white", pad=8)
- 
-    # Draw each hex tile
-    for row_index, row in enumerate(LAND_HEX_LAYOUT):
-        for column_index, hex_position in enumerate(row):
-            center_x, center_y = land_hex_center(row_index, column_index)
-            tile = board[hex_position]
-            corners = land_hex_verticies(center_x, center_y)
- 
-            # Close the polygon by repeating the first point at the end
-            x_points = [point[0] for point in corners] + [corners[0][0]]
-            y_points = [point[1] for point in corners] + [corners[0][1]]
- 
-            # Fill the hex with its resource colour
-            board_axes.fill(x_points, y_points, color=RESOURCE_COLORS[tile["Resource"]], zorder=1, alpha=0.92)
- 
-            # Draw the hex border
-            border_color     = "#eeeeee"
-            border_thickness = 1.2
-            board_axes.plot(x_points, y_points, color=border_color, linewidth=border_thickness, zorder=2)
- 
-            # Resource name label at top of hex
-            board_axes.text(center_x, center_y + 0.50, RESOURCE_NAMES[tile["Resource"]], ha="center", va="center", fontsize=6.5, color="white", fontweight="bold", zorder=3)
- 
-            # Number token circle and number (skip desert)
-            if tile["Token"]:
-                number_color = "#ff4444" if tile["Pips"] >= 4 else "#eeeeee"
-                token_circle = Circle((center_x, center_y - 0.10), radius=0.35, facecolor="#1a1a1a", edgecolor=number_color, linewidth=1.5, zorder=4)
-                board_axes.add_patch(token_circle)
-                board_axes.text(center_x, center_y - 0.05, str(tile["Token"]), ha="center", va="center", fontsize=8.5, fontweight="bold", color=number_color, zorder=5)
- 
-                # Pip dots underneath the number
-                for dot_index in range(tile["Pips"]):
-                    dot_x_offset = (dot_index - (tile["Pips"] - 1) / 2) * 0.15
-                    pip_dot = Circle((center_x + dot_x_offset, center_y - 0.35), radius=0.035, facecolor=number_color, zorder=5)
-                    board_axes.add_patch(pip_dot)
- 
-    # Draw vertex dots (skip vertices that already have a settlement)
-    placed_vertices = set(settlements)
-    for vertex_id, coordinates in vertex_id_to_coordinate.items():
-        vertex_x, vertex_y = coordinates
-        if vertex_id in placed_vertices:
-            continue
-        vertex_dot = Circle((vertex_x, vertex_y), radius=0.09, facecolor="#444444", edgecolor="#888888", linewidth=0.8, zorder=6)
-        board_axes.add_patch(vertex_dot)
- 
-    # Draw settlement markers on top
-    for settlement_index, vertex_id in enumerate(settlements):
-        vertex_x, vertex_y = vertex_id_to_coordinate[vertex_id]
-        settlement_color = SETTLEMENT_COLORS[settlement_index % len(SETTLEMENT_COLORS)]
-        settlement_marker = Circle((vertex_x, vertex_y), radius=0.25, facecolor=settlement_color, edgecolor="white", linewidth=2, zorder=10)
-        board_axes.add_patch(settlement_marker)
-        board_axes.text(vertex_x, vertex_y, str(settlement_index + 1), ha="center", va="center", fontsize=9, fontweight="bold", color="black", zorder=11)
- 
-    # Set the axis boundaries to fit the board with a small margin
-    all_x_centers = [land_hex_center(row_index, column_index)[0]
-                     for row_index, row in enumerate(LAND_HEX_LAYOUT)
-                     for column_index in range(len(row))]
-    all_y_centers = [land_hex_center(row_index, column_index)[1]
-                     for row_index, row in enumerate(LAND_HEX_LAYOUT)
-                     for column_index in range(len(row))]
-    margin = 1.2
-    board_axes.set_xlim(min(all_x_centers) - margin, max(all_x_centers) + margin)
-    board_axes.set_ylim(min(all_y_centers) - margin, max(all_y_centers) + margin)
- 
- 
-def draw_analysis_panel(analysis_axes, board, settlements, vertex_to_hexes):
-    """Draw the settlement pip breakdown panel on the right."""
-    analysis_axes.cla()
-    analysis_axes.set_facecolor("#111111")
-    analysis_axes.axis("off")
-    analysis_axes.set_title("Settlement Analysis", fontsize=12, fontweight="bold", color="white", pad=8)
- 
-    # Show a placeholder message if no settlements have been placed yet
-    if not settlements:
-        analysis_axes.text(0.5, 0.5, "No settlements placed yet.\nClick the dots on the board.", transform=analysis_axes.transAxes, ha="center", va="center", fontsize=10, color="#888888", style="italic")
-        return
- 
-    per_settlement, unique_pips, resource_types = Settlement_Analysis(
-        settlements, board, vertex_to_hexes)
- 
-    # Build a list of (text, color, font_size, font_weight) lines to display
-    display_lines = []
- 
-    for settlement_index, settlement_data in enumerate(per_settlement):
-        header_color = SETTLEMENT_COLORS[settlement_index % len(SETTLEMENT_COLORS)]
-        display_lines.append((f"Settlement {settlement_index + 1}  (vertex {settlement_data['Vertex ID']})", header_color, 10, "bold"))
-        for (resource, number, pips) in settlement_data["Tiles"]:
-            number_text  = str(number) if number else "—"
-            pip_bar      = "●" * pips + "○" * (5 - pips)
-            display_lines.append(( f"  {resource:9s}  #{number_text:>2}  {pip_bar}  ({pips} Pips)", pip_color(pips), 8.5, "normal"))
-        display_lines.append((f"  Sub-total: {settlement_data['Subtotal of Pips']} Pips", "#dddddd", 9, "bold"))
-        display_lines.append(("", "white", 8, "normal"))    # blank spacer line
- 
-    # Summary totals at the bottom
-    display_lines.append(("─" * 38, "#444444", 8, "normal"))
-    display_lines.append((f"Total unique pips:     {unique_pips}",         "#f4a93c", 10, "bold"))
-    display_lines.append((f"Resources per 36 rolls: {unique_pips/36:.3f}", "#dddddd", 9,  "normal"))
-    display_lines.append((f"Resource types:        {len(resource_types)}",  "#dddddd", 9,  "normal"))
- 
-    # Alex Note: Add % of Optimal Line Here TODO
-    #
-    #
-    #
-    #
-    #
+        variance = 0.0
+
+    # isolation: number of valid adjacent vertices not yet placed
+    isolation = 0
+    adjacent  = set()
+    if hex_to_vtx is not None:
+        for h in hexes:
+            for v in hex_to_vtx.get(h, []):
+                if v != vid:
+                    adjacent.add(v)
+        if placed is not None:
+            placed_set = set(placed)
+            isolation  = sum(1 for v in adjacent if v not in placed_set)
+
+    # binary resource features
+    has_wood   = 1 if any(r == "Forest" for r in res_list) else 0
+    has_brick  = 1 if any(r == "Hills"  for r in res_list) else 0
+    has_scarce = 1 if any(r in SCARCE_RESOURCES for r in res_list) else 0
+
+    # edge vertex: touches fewer than 3 hexes
+    is_edge = 1 if num_hexes < 3 else 0
+
+    # number of opponent settlements sharing an adjacent hex
+    neighbor_opp = 0
+    if opponent_placed is not None and hex_to_vtx is not None:
+        opp_set = set(opponent_placed)
+        neighbor_opp = sum(1 for v in adjacent if v in opp_set)
+
+    raw = [pip_sum, max_pip, count_high, num_hexes,
+           resource_variety, variance, min_pip, isolation,
+           has_wood, has_brick, has_scarce, is_edge, neighbor_opp]
+    return [r / m for r, m in zip(raw, FEATURE_MAX)]
+
+def score_vertex(vid, board, vtx_to_hex, weights,
+                 hex_to_vtx=None, placed=None, opponent_placed=None):
+    return sum(w * f for w, f in zip(weights,
+               vertex_features(vid, board, vtx_to_hex, hex_to_vtx, placed, opponent_placed)))
 
 
+# =============================
+# Validity
+# =============================
+
+def is_valid(vertex, placed, vtx_to_hex, hex_to_vtx):
+    if vertex in placed:
+        return False
+    for p in placed:
+        for h in vtx_to_hex.get(p, []):
+            corners = hex_to_vtx.get(h, [])
+            for i, c in enumerate(corners):
+                if c == p:
+                    if vertex in (corners[i-1], corners[(i+1) % len(corners)]):
+                        return False
+    return True
 
 
-    # Render each line top to bottom
-    number_of_lines = len(display_lines)
-    if number_of_lines > 30:
-        scale = 0.5
-    elif number_of_lines > 20:
-        scale = 0.75
-    else:
-        scale = 1.0
+# =============================
+# Competitive Placement
+# =============================
 
-    current_y = 1.00
-    for (text, color, font_size, font_weight) in display_lines:
-        scaled_font_size = font_size * scale
-        analysis_axes.text(0.05, current_y, text, transform=analysis_axes.transAxes, fontsize=scaled_font_size, color=color, fontweight=font_weight, fontfamily="monospace", va="top")
-        current_y -= (0.05 if font_size >= 10 else 0.045) * scale
- 
- 
-def draw_legend_panel(legend_axes):
-    """Draw the pip color legend panel."""
-    legend_axes.cla()
-    legend_axes.set_facecolor("#111111")
-    legend_axes.axis("off")
-    legend_axes.set_title("Pip Legend", fontsize=11, fontweight="bold",color="white", pad=8)
- 
-    legend_items = [
-        (5, "6 or 8   — 5/36 rolls"),
-        (4, "5 or 9   — 4/36 rolls"),
-        (3, "4 or 10  — 3/36 rolls"),
-        (2, "3 or 11  — 2/36 rolls"),
-        (1, "2 or 12  — 1/36 rolls"),
-        (0, "Desert   — never rolled"),
-    ]
-
-    legend_axes.set_xlim(0, 1)
-    legend_axes.set_ylim(0, 1)
-    legend_axes.set_aspect("equal")
-
-    for item_index, (pips, label_text) in enumerate(legend_items):
-        vertical_position = 0.90 - item_index * 0.15
-        color_dot = Circle((0.07, vertical_position), 0.04, color=pip_color(pips), transform=legend_axes.transAxes, clip_on=False)
-        legend_axes.add_patch(color_dot)
-        legend_axes.text(0.15, vertical_position, label_text, transform=legend_axes.transAxes, va="center", fontsize=8.5, color="#cccccc", fontfamily="monospace")
- 
-    legend_axes.text(0.5, 0.05,"    'r' = new board     'c' = clear settlements     ",transform=legend_axes.transAxes, ha="center", va="center", fontsize=8, color="#666666")
-
-
-
-
-
-
-
-
-
-
-
-# ====================
-# Mouse Right Click Function
-# ====================
-
-CLICK_DETECTION_RADIUS = 0.25
- 
-def find_nearest_vertex(click_x, click_y, vertex_id_to_coordinate):
+def decode_competitive(weights, board, vtx_to_hex, hex_to_vtx, id_to_coord):
     """
-    Returns the vertex ID closest to the click position,
-    but only if it is within CLICK_DETECTION_RADIUS units.
-    Returns None if no vertex is close enough.
+    Alternating placement with random starting order.
+    Each game randomly decides whether EA or opponent goes first.
+    EA uses greedy weighted scoring; opponent places randomly.
+    Returns (ea_settlements, opponent_settlements).
     """
-    nearest_vertex_id = None
-    nearest_distance  = float('inf')
- 
-    for vertex_id, coordinates in vertex_id_to_coordinate.items():
-        vertex_x, vertex_y = coordinates
-        distance = math.sqrt((click_x - vertex_x)**2 + (click_y - vertex_y)**2)
-        if distance < nearest_distance:
-            nearest_distance  = distance
-            nearest_vertex_id = vertex_id
- 
-    if nearest_distance <= CLICK_DETECTION_RADIUS:
-        return nearest_vertex_id
-    return None
+    all_placed  = []
+    ea_s        = []
+    opp_s       = []
+
+    ea_first = random.random() < 0.5   # randomly decide who goes first
+
+    for turn in range(MAX_SETTLEMENTS * 2):
+        ea_turn = (turn % 2 == 0) if ea_first else (turn % 2 == 1)
+
+        if ea_turn:                                # EA's turn — greedy
+            ranked = sorted(id_to_coord.keys(),
+                            key=lambda v: score_vertex(v, board, vtx_to_hex, weights,
+                                                       hex_to_vtx, all_placed, opp_s),
+                            reverse=True)
+            for v in ranked:
+                if is_valid(v, all_placed, vtx_to_hex, hex_to_vtx):
+                    ea_s.append(v)
+                    all_placed.append(v)
+                    break
+        else:                                      # Opponent's turn — random
+            valid = [v for v in id_to_coord if is_valid(v, all_placed, vtx_to_hex, hex_to_vtx)]
+            if valid:
+                v = random.choice(valid)
+                opp_s.append(v)
+                all_placed.append(v)
+
+    return ea_s, opp_s
 
 
-# ======================
-# Convergence Chart TODO
-# ======================
+# =============================
+# Fitness Function  (3 modes)
+# =============================
+
+def fitness_competitive(ea_s, opp_s, board, vtx_to_hex, mode=None):
+    if mode is None:
+        mode = current_fitness_mode()
+    _, ea_pips,  _ = settlement_analysis(ea_s,  board, vtx_to_hex)
+    _, opp_pips, _ = settlement_analysis(opp_s, board, vtx_to_hex)
+    if mode == "difference":
+        return ea_pips - opp_pips
+    elif mode == "ratio":
+        return ea_pips / (ea_pips + opp_pips) if (ea_pips + opp_pips) > 0 else 0.0
+    else:                                           # absolute
+        return float(ea_pips)
+
+def fitness_multi_board(weights, boards, vtx_to_hex, hex_to_vtx, id_to_coord, mode=None):
+    """Average fitness across multiple boards (used as EA objective)."""
+    return sum(
+        fitness_competitive(*decode_competitive(weights, b, vtx_to_hex, hex_to_vtx, id_to_coord),
+                            b, vtx_to_hex, mode)
+        for b in boards
+    ) / len(boards)
 
 
+# =============================
+# EA Operators
+# =============================
+
+def tournament_selection(population, fitnesses, k=3):
+    """k-way tournament selection."""
+    candidates = random.sample(range(len(population)), min(k, len(population)))
+    return population[max(candidates, key=lambda i: fitnesses[i])][:]
+
+def recombine(pa, pb):
+    """Uniform crossover on weight vectors."""
+    return [a if random.random() < 0.5 else b for a, b in zip(pa, pb)]
+
+def mutate(weights, sigma=EA_MUTATION_SIGMA):
+    """Gaussian mutation, weights clipped to non-negative."""
+    return [max(0.0, w + random.gauss(0, sigma)) for w in weights]
 
 
+# =============================
+# Evolutionary Algorithm
+# =============================
 
+def run_ea(vtx_to_hex, hex_to_vtx, id_to_coord,
+           pop_size=EA_POP_SIZE, generations=EA_GENERATIONS, num_boards=EA_NUM_BOARDS):
+    """
+    Evolve a weight vector [w_pip_sum, w_max_pip, w_count_high, w_num_hexes] that
+    maximises average competitive fitness across num_boards random training boards.
 
-# ====
-# Main
-# ====
- 
-def main():
-    # Shared state stored in a dictionary so the event handlers can modify it
-    program_state = {
-        "Board"       : generate_board(),
-        "Settlements" : [],
+    Tracks per generation:
+      best_per_gen, avg_per_gen     — convergence
+      diversity_per_gen             — mean std-dev of weights (population spread)
+      crossover_delta_per_gen       — avg(child_fitness - mean_parent_fitness) before mutation
+      mutation_delta_per_gen        — avg(after_mutation_fitness - before_mutation_fitness)
+
+    Returns (best_weights, stats_dict).
+    """
+    mode   = current_fitness_mode()
+    boards = [generate_board() for _ in range(num_boards)]
+    # Smaller board sample for operator-effect tracking (keeps runtime reasonable)
+    sample_boards = boards[:5]
+
+    population = [[random.uniform(0, 1) for _ in range(NUM_WEIGHTS)]
+                  for _ in range(pop_size)]
+
+    best_weights = None
+    best_fitness = -1e9
+
+    best_per_gen          = []
+    avg_per_gen           = []
+    diversity_per_gen     = []
+    crossover_delta_per_gen = []
+    mutation_delta_per_gen  = []
+
+    for gen in range(generations):
+        fitnesses = [fitness_multi_board(ind, boards, vtx_to_hex, hex_to_vtx, id_to_coord, mode)
+                     for ind in population]
+
+        gen_best = max(fitnesses)
+        gen_avg  = sum(fitnesses) / len(fitnesses)
+        best_per_gen.append(gen_best)
+        avg_per_gen.append(gen_avg)
+
+        # Progress bar
+        pct  = (gen + 1) / generations
+        bar  = "█" * int(pct * 30) + "░" * (30 - int(pct * 30))
+        print(f"\r[{bar}] {gen+1}/{generations}  best={gen_best:.3f}  avg={gen_avg:.3f}", end="", flush=True)
+        if gen == generations - 1:
+            print()
+
+        # Diversity: mean of per-dimension std-dev across population
+        diversity = 0.0
+        for dim in range(NUM_WEIGHTS):
+            vals = [ind[dim] for ind in population]
+            mean = sum(vals) / len(vals)
+            diversity += math.sqrt(sum((v - mean)**2 for v in vals) / len(vals))
+        diversity_per_gen.append(diversity / NUM_WEIGHTS)
+
+        best_idx = fitnesses.index(gen_best)
+        if gen_best > best_fitness:
+            best_fitness = gen_best
+            best_weights = population[best_idx][:]
+
+        # Build next generation + track operator effects
+        new_population   = [population[best_idx][:]]
+        xover_deltas     = []
+        mut_deltas       = []
+
+        while len(new_population) < pop_size:
+            pa     = tournament_selection(population, fitnesses)
+            pb     = tournament_selection(population, fitnesses)
+            child  = recombine(pa, pb)
+
+            # Crossover delta: child fitness vs average parent fitness (on sample boards)
+            fa     = fitness_multi_board(pa,    sample_boards, vtx_to_hex, hex_to_vtx, id_to_coord, mode)
+            fb     = fitness_multi_board(pb,    sample_boards, vtx_to_hex, hex_to_vtx, id_to_coord, mode)
+            fc     = fitness_multi_board(child, sample_boards, vtx_to_hex, hex_to_vtx, id_to_coord, mode)
+            xover_deltas.append(fc - (fa + fb) / 2)
+
+            child_before = child[:]
+            child        = mutate(child)
+
+            # Mutation delta: fitness after vs before mutation (on sample boards)
+            fm = fitness_multi_board(child, sample_boards, vtx_to_hex, hex_to_vtx, id_to_coord, mode)
+            mut_deltas.append(fm - fc)
+
+            new_population.append(child)
+
+        crossover_delta_per_gen.append(sum(xover_deltas) / len(xover_deltas))
+        mutation_delta_per_gen.append(sum(mut_deltas)   / len(mut_deltas))
+        population = new_population
+
+    stats = {
+        "best_per_gen"           : best_per_gen,
+        "avg_per_gen"            : avg_per_gen,
+        "diversity_per_gen"      : diversity_per_gen,
+        "crossover_delta_per_gen": crossover_delta_per_gen,
+        "mutation_delta_per_gen" : mutation_delta_per_gen,
     }
- 
-    vertex_to_hexes, hex_to_vertices, vertex_id_to_coordinate = generate_vertex_map()
- 
-    # Set up the figure with three panels:
-    # left column  — board (spans both rows)
-    # top right    — settlement analysis
-    # bottom right — pip legend
-    figure = plt.figure(figsize=(14, 8), facecolor="#0f1117")
-    figure.suptitle("Catan — Interactive Settlement Placer", fontsize=14, fontweight="bold", color="white", y=0.99)
-    
-    # Alex Note: Convergence chart will affect the grid layout
-    grid_layout = figure.add_gridspec(2, 2, width_ratios=[1.5, 1],  height_ratios=[1.5, 0.5],  hspace=0.25, wspace=0.05,  left=0.01, right=0.99,  top=0.95, bottom=0.02)
- 
-    board_axes    = figure.add_subplot(grid_layout[:, 0])   # board — full left column
-    analysis_axes = figure.add_subplot(grid_layout[0, 1])   # analysis — top right
-    legend_axes   = figure.add_subplot(grid_layout[1, 1])   # legend — bottom right
-    # Alex Note: add convergence_axes subplot
-    #
-    #
-    #
-    #
- 
-    def refresh_display():
-        """Redraw all three panels with the current program state."""
-        draw_board(board_axes, program_state["Board"], vertex_id_to_coordinate, program_state["Settlements"])
-        draw_analysis_panel(analysis_axes, program_state["Board"], program_state["Settlements"], vertex_to_hexes)
-        draw_legend_panel(legend_axes)
-        # Alex Note: we can add a convergence chart here (I can implement myself)
-        #
-        #
-        #
-        #
-        figure.canvas.draw_idle()
- 
-    refresh_display()
- 
-    # Mouse Click Controls
-    def on_mouse_click(click_event):
-        # Ignore clicks outside the board panel
-        if click_event.inaxes != board_axes:
-            return
-        if click_event.xdata is None or click_event.ydata is None:
-            return
-        if len(program_state["Settlements"]) >= MAX_SETTLEMENTS:
-            print(f"Already placed {MAX_SETTLEMENTS} settlements. Press 'c' to clear.")
-            return
- 
-        nearest_vertex = find_nearest_vertex(click_event.xdata, click_event.ydata, vertex_id_to_coordinate)
-        if nearest_vertex is None:
-            return
-        if nearest_vertex in program_state["Settlements"]:
-            print(f"Vertex {nearest_vertex} already has a settlement — pick another.")
-            return
-        
-        # Settlements must be 1 vertex away from eachother
-        adjacent_to_placed = set()
-        for placed_vertex in program_state["Settlements"]:
-            for hex_position in vertex_to_hexes.get(placed_vertex, []):
-                hex_corners = hex_to_vertices.get(hex_position, [])
-                for i in range(len(hex_corners)):
-                    if hex_corners[i] == placed_vertex:
-                        previous_corner = hex_corners[i - 1]
-                        next_corner = hex_corners[(i + 1) if (i + 1) < len(hex_corners) else 0]
-                        adjacent_to_placed.add(previous_corner)
-                        adjacent_to_placed.add(next_corner)
-
-        if nearest_vertex in adjacent_to_placed:
-            print(f"Vertex {nearest_vertex} is too close — must be at least 1 vertex away.")
-            return
+    return best_weights, stats
 
 
- 
-        program_state["Settlements"].append(nearest_vertex)
-        print(f"Placed settlement {len(program_state['Settlements'])} at vertex {nearest_vertex}")
-        refresh_display()
- 
-    # Keyboard Controls
-    def on_key_press(key_event):
-        if key_event.key == 'r':
-            program_state["Board"]       = generate_board()
-            program_state["Settlements"] = []
-            print("New board generated.")
-            refresh_display()
-        elif key_event.key == 'c':
-            program_state["Settlements"] = []
-            print("Settlements cleared.")
-            refresh_display()
-    # We can add later a key bind 'e' where the EA runns manually
-    #
-    #
-    #
-    #
-    #
+# =============================
+# Results Figure
+# =============================
 
+def show_results_figure(stats, best_weights, vtx_to_hex, hex_to_vtx, id_to_coord):
+    """
+    Pop up a separate figure with 6 panels:
+      1. Convergence (best + avg fitness per generation)
+      2. Population diversity per generation
+      3. Crossover effect (avg child - avg_parent per generation)
+      4. Mutation effect (avg fitness delta per generation)
+      5. EA vs random opponent pip comparison (box plot over EA_TEST_BOARDS fresh boards)
+      6. Best weight vector values
+    """
+    mode = current_fitness_mode()
 
+    # ── Test on fresh boards ──────────────────────────────────────────────
+    test_boards  = [generate_board() for _ in range(EA_TEST_BOARDS)]
+    ea_pips_list  = []
+    opp_pips_list = []
+    for b in test_boards:
+        ea_s, opp_s = decode_competitive(best_weights, b, vtx_to_hex, hex_to_vtx, id_to_coord)
+        _, ep, _ = settlement_analysis(ea_s,  b, vtx_to_hex)
+        _, op, _ = settlement_analysis(opp_s, b, vtx_to_hex)
+        ea_pips_list.append(ep)
+        opp_pips_list.append(op)
 
- 
-    figure.canvas.mpl_connect("button_press_event", on_mouse_click)
-    figure.canvas.mpl_connect("key_press_event",    on_key_press)
- 
+    # ── Figure layout ─────────────────────────────────────────────────────
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), facecolor="white")
+    fig.suptitle(f"EA Results  |  fitness mode: {mode}  |  {EA_TEST_BOARDS} test boards",
+                 fontsize=13, fontweight="bold", color="black")
+
+    DARK   = "white"
+    TICK_C = "black"
+
+    def style(ax, title, xlabel, ylabel):
+        ax.set_facecolor(DARK)
+        ax.set_title(title, color="black", fontsize=10, fontweight="bold")
+        ax.set_xlabel(xlabel, color=TICK_C, fontsize=8)
+        ax.set_ylabel(ylabel, color=TICK_C, fontsize=8)
+        ax.tick_params(colors=TICK_C, labelsize=7)
+        for sp in ax.spines.values():
+            sp.set_edgecolor("#aaaaaa")
+
+    gens = range(len(stats["best_per_gen"]))
+
+    # 1. Convergence
+    ax = axes[0, 0]
+    style(ax, "Convergence", "Generation", f"Fitness ({mode})")
+    ax.plot(gens, stats["best_per_gen"], color="#f4a93c", lw=1.5, label="Best")
+    ax.plot(gens, stats["avg_per_gen"],  color="#7ec8f4", lw=1.0, alpha=0.8, label="Average")
+    ax.legend(fontsize=7, facecolor="white", labelcolor="black")
+
+    # 2. Population diversity
+    ax = axes[0, 1]
+    style(ax, "Population Diversity", "Generation", "Mean weight std-dev")
+    ax.plot(gens, stats["diversity_per_gen"], color="#88ff88", lw=1.2)
+
+    # 3. Crossover effect
+    ax = axes[0, 2]
+    style(ax, "Crossover Effect", "Generation", "Avg(child − avg_parents)")
+    ax.plot(gens, stats["crossover_delta_per_gen"], color="#ff88ff", lw=1.2)
+    ax.axhline(0, color="#aaaaaa", lw=0.8, linestyle="--")
+
+    # 4. Mutation effect
+    ax = axes[1, 0]
+    style(ax, "Mutation Effect", "Generation", "Avg fitness Δ from mutation")
+    ax.plot(gens, stats["mutation_delta_per_gen"], color="#cc7700", lw=1.2)
+    ax.axhline(0, color="#aaaaaa", lw=0.8, linestyle="--")
+
+    # 5. EA vs opponent pip comparison
+    ax = axes[1, 1]
+    style(ax, f"EA vs Random Opponent  ({EA_TEST_BOARDS} boards)", "Player", "Total pip sum")
+    bp = ax.boxplot([ea_pips_list, opp_pips_list],
+                    labels=["EA", "Random"],
+                    patch_artist=True,
+                    medianprops=dict(color="black", lw=2))
+    bp["boxes"][0].set_facecolor("#5b8cff")
+    bp["boxes"][1].set_facecolor("#aaaaaa")
+    for elem in ["whiskers", "caps", "fliers"]:
+        for item in bp[elem]:
+            item.set_color("black")
+    ea_mean  = sum(ea_pips_list)  / len(ea_pips_list)
+    opp_mean = sum(opp_pips_list) / len(opp_pips_list)
+    ax.text(0.5, 0.95,
+            f"EA mean={ea_mean:.1f}   Opponent mean={opp_mean:.1f}",
+            transform=ax.transAxes, ha="center", va="top",
+            color="black", fontsize=8)
+
+    # 6. Best weight vector
+    ax = axes[1, 2]
+    style(ax, "Best Weight Vector", "Feature", "Weight value")
+    labels = ["pip_sum", "max_pip", "count_high", "num_hexes",
+              "res_variety", "pip_var", "min_pip", "isolation",
+              "has_wood", "has_brick", "has_scarce", "is_edge", "nbr_opp"]
+    colors = ["#f4a93c", "#7ec8f4", "#88ff88", "#ff88ff",
+              "#ff7744", "#44ffcc", "#aa88ff", "#ffcc44",
+              "#55cc55", "#cc5555", "#cc55cc", "#5555cc", "#cccccc"]
+    bars   = ax.bar(labels, best_weights, color=colors)
+    for bar, val in zip(bars, best_weights):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                f"{val:.3f}", ha="center", va="bottom", color="black", fontsize=8)
+    ax.tick_params(axis="x", labelrotation=15)
+
+    plt.tight_layout()
     plt.show()
- 
- 
+
+
+# =============================
+# Board Visualisation
+# =============================
+
+def draw_board(ax, board, id_to_coord, ea_settlements, opp_settlements):
+    ax.cla()
+    ax.set_facecolor("#0f1117")
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+    all_placed = len(ea_settlements) + len(opp_settlements)
+    total      = MAX_SETTLEMENTS * 2
+    if all_placed < total:
+        turn   = all_placed % 2
+        player = "EA" if turn == 0 else "Opponent"
+        ax.set_title(f"Turn {all_placed+1}/{total} — {player}'s placement  |  'e'=run EA  'f'=cycle fitness",
+                     fontsize=10, color="white", pad=8)
+    else:
+        ax.set_title(f"All settlements placed  |  Press 'c' to clear  |  fitness: {current_fitness_mode()}",
+                     fontsize=10, color="white", pad=8)
+
+    for r, row in enumerate(LAND_HEX_LAYOUT):
+        for c, pos in enumerate(row):
+            cx, cy   = land_hex_center(r, c)
+            tile     = board[pos]
+            corners  = land_hex_vertices(cx, cy)
+            xs = [p[0] for p in corners] + [corners[0][0]]
+            ys = [p[1] for p in corners] + [corners[0][1]]
+            ax.fill(xs, ys, color=RESOURCE_COLORS[tile["Resource"]], zorder=1, alpha=0.92)
+            ax.plot(xs, ys, color="#eeeeee", lw=1.2, zorder=2)
+            ax.text(cx, cy+0.50, RESOURCE_NAMES[tile["Resource"]], ha="center", va="center",
+                    fontsize=6.5, color="white", fontweight="bold", zorder=3)
+            if tile["Token"]:
+                nc = "#ff4444" if tile["Pips"] >= 4 else "#eeeeee"
+                ax.add_patch(Circle((cx, cy-0.10), 0.35, facecolor="#1a1a1a", edgecolor=nc, lw=1.5, zorder=4))
+                ax.text(cx, cy-0.05, str(tile["Token"]), ha="center", va="center",
+                        fontsize=8.5, fontweight="bold", color=nc, zorder=5)
+                for di in range(tile["Pips"]):
+                    ox = (di - (tile["Pips"]-1)/2) * 0.15
+                    ax.add_patch(Circle((cx+ox, cy-0.35), 0.035, facecolor=nc, zorder=5))
+
+    placed_set = set(ea_settlements) | set(opp_settlements)
+    for vid, (vx, vy) in id_to_coord.items():
+        if vid not in placed_set:
+            ax.add_patch(Circle((vx, vy), 0.09, facecolor="#444444", edgecolor="#888888", lw=0.8, zorder=6))
+
+    # EA settlements (blue tones)
+    for i, vid in enumerate(ea_settlements):
+        vx, vy = id_to_coord[vid]
+        ax.add_patch(Circle((vx, vy), 0.25, facecolor=SETTLEMENT_COLORS[i], edgecolor="white", lw=2, zorder=10))
+        ax.text(vx, vy, f"E{i+1}", ha="center", va="center", fontsize=8, fontweight="bold", color="black", zorder=11)
+
+    # Opponent settlements (grey/purple)
+    for i, vid in enumerate(opp_settlements):
+        vx, vy = id_to_coord[vid]
+        ax.add_patch(Circle((vx, vy), 0.25, facecolor=SETTLEMENT_COLORS[2+i], edgecolor="white", lw=2, zorder=10))
+        ax.text(vx, vy, f"O{i+1}", ha="center", va="center", fontsize=8, fontweight="bold", color="black", zorder=11)
+
+    xs_all = [land_hex_center(r, c)[0] for r, row in enumerate(LAND_HEX_LAYOUT) for c in range(len(row))]
+    ys_all = [land_hex_center(r, c)[1] for r, row in enumerate(LAND_HEX_LAYOUT) for c in range(len(row))]
+    m = 1.2
+    ax.set_xlim(min(xs_all)-m, max(xs_all)+m)
+    ax.set_ylim(min(ys_all)-m, max(ys_all)+m)
+
+
+def draw_analysis(ax, board, ea_s, opp_s, vtx_to_hex, ea_best_fitness=None):
+    ax.cla()
+    ax.set_facecolor("#111111")
+    ax.axis("off")
+    ax.set_title("Settlement Analysis", fontsize=12, fontweight="bold", color="white", pad=8)
+
+    if not ea_s and not opp_s:
+        ax.text(0.5, 0.5, "Press 'e' to run EA\nor click vertices manually.",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=10, color="#888888", style="italic")
+        return
+
+    lines = []
+
+    for label, settlements, colors in [("EA", ea_s, SETTLEMENT_COLORS[:2]),
+                                        ("Opponent", opp_s, SETTLEMENT_COLORS[2:])]:
+        if not settlements:
+            continue
+        _, upips, ures = settlement_analysis(settlements, board, vtx_to_hex)
+        lines.append((f"── {label} ──────────────────────", "#aaaaaa", 9, "normal"))
+        per, _, _ = settlement_analysis(settlements, board, vtx_to_hex)
+        for i, sd in enumerate(per):
+            lines.append((f"Settlement {i+1}  (v{sd['Vertex ID']})", colors[i % len(colors)], 9.5, "bold"))
+            for res, num, pips in sd["Tiles"]:
+                nt  = str(num) if num else "—"
+                bar = "●"*pips + "○"*(5-pips)
+                lines.append((f"  {res:9s}  #{nt:>2}  {bar}", pip_color(pips), 8, "normal"))
+            lines.append((f"  sub: {sd['Subtotal of Pips']} pips", "#dddddd", 8.5, "bold"))
+        lines.append((f"  Unique pips: {upips}   Resources: {len(ures)}", "#f4a93c", 9, "bold"))
+        lines.append(("", "white", 8, "normal"))
+
+    # Competitive summary
+    if ea_s and opp_s:
+        _, ep, _ = settlement_analysis(ea_s,  board, vtx_to_hex)
+        _, op, _ = settlement_analysis(opp_s, board, vtx_to_hex)
+        diff  = ep - op
+        ratio = ep / (ep + op) if (ep + op) > 0 else 0
+        lines.append(("─" * 36, "#444444", 8, "normal"))
+        col = "#88ff88" if diff >= 0 else "#e84040"
+        lines.append((f"Pip advantage: {diff:+d}   ({ratio*100:.1f}%)", col, 10, "bold"))
+        lines.append((f"Fitness mode: {current_fitness_mode()}", "#aaaaaa", 8, "normal"))
+
+    n     = len(lines)
+    scale = 0.5 if n > 32 else (0.72 if n > 22 else 1.0)
+    y     = 1.00
+    for text, color, fs, fw in lines:
+        ax.text(0.04, y, text, transform=ax.transAxes,
+                fontsize=fs*scale, color=color, fontweight=fw,
+                fontfamily="monospace", va="top")
+        y -= (0.048 if fs >= 9.5 else 0.042) * scale
+
+
+def draw_legend(ax):
+    ax.cla()
+    ax.set_facecolor("#111111")
+    ax.axis("off")
+    ax.set_title("Pip Legend", fontsize=11, fontweight="bold", color="white", pad=8)
+    items = [(5,"6/8 — 5/36"),(4,"5/9 — 4/36"),(3,"4/10 — 3/36"),
+             (2,"3/11 — 2/36"),(1,"2/12 — 1/36"),(0,"Desert — 0")]
+    ax.set_xlim(0,1); ax.set_ylim(0,1); ax.set_aspect("equal")
+    for i, (p, label) in enumerate(items):
+        vp = 0.90 - i*0.15
+        ax.add_patch(Circle((0.07, vp), 0.04, color=pip_color(p),
+                             transform=ax.transAxes, clip_on=False))
+        ax.text(0.15, vp, label, transform=ax.transAxes, va="center",
+                fontsize=8.5, color="#cccccc", fontfamily="monospace")
+    ax.text(0.5, 0.04, "'r'=new board  'c'=clear  'e'=EA  'f'=fitness",
+            transform=ax.transAxes, ha="center", fontsize=7.5, color="#666666")
+
+
+def draw_convergence(ax, stats):
+    ax.cla()
+    ax.set_facecolor("#111111")
+    ax.set_title(f"EA Convergence  [{current_fitness_mode()}]",
+                 fontsize=10, fontweight="bold", color="white", pad=6)
+    ax.tick_params(colors="#aaaaaa", labelsize=7)
+    for sp in ax.spines.values():
+        sp.set_edgecolor("#444444")
+    if stats is None:
+        ax.text(0.5, 0.5, "Press 'e' to run EA",
+                transform=ax.transAxes, ha="center", va="center",
+                fontsize=9, color="#888888", style="italic")
+        return
+    gens = range(len(stats["best_per_gen"]))
+    ax.plot(gens, stats["best_per_gen"], color="#f4a93c", lw=1.5, label="Best")
+    ax.plot(gens, stats["avg_per_gen"],  color="#7ec8f4", lw=1.0, alpha=0.8, label="Average")
+    ax.set_xlabel("Generation", fontsize=7, color="#aaaaaa")
+    ax.set_ylabel("Fitness", fontsize=7, color="#aaaaaa")
+    ax.legend(fontsize=7, facecolor="#222222", labelcolor="white", framealpha=0.8)
+
+
+# =============================
+# Click Helper
+# =============================
+
+CLICK_RADIUS = 0.25
+
+def nearest_vertex(cx, cy, id_to_coord):
+    best_id, best_d = None, float("inf")
+    for vid, (vx, vy) in id_to_coord.items():
+        d = math.sqrt((cx-vx)**2 + (cy-vy)**2)
+        if d < best_d:
+            best_d, best_id = d, vid
+    return best_id if best_d <= CLICK_RADIUS else None
+
+
+# =============================
+# Main
+# =============================
+
+def main():
+    state = {
+        "Board"      : generate_board(),
+        "EA_s"       : [],    # EA settlements
+        "Opp_s"      : [],    # opponent settlements
+        "EA_weights" : None,
+        "EA_stats"   : None,
+        "EA_fitness" : None,
+    }
+
+    vtx_to_hex, hex_to_vtx, id_to_coord = generate_vertex_map()
+
+    fig = plt.figure(figsize=(14, 8), facecolor="#0f1117")
+    fig.suptitle("Catan — Competitive EA  (indirect encoding vs random opponent)",
+                 fontsize=13, fontweight="bold", color="white", y=0.99)
+
+    gs = fig.add_gridspec(3, 2, width_ratios=[1.5, 1],
+                          height_ratios=[1.8, 0.55, 0.75],
+                          hspace=0.35, wspace=0.05,
+                          left=0.01, right=0.99, top=0.95, bottom=0.02)
+
+    ax_board = fig.add_subplot(gs[:, 0])
+    ax_ana   = fig.add_subplot(gs[0, 1])
+    ax_leg   = fig.add_subplot(gs[1, 1])
+    ax_conv  = fig.add_subplot(gs[2, 1])
+
+    def refresh():
+        draw_board(ax_board, state["Board"], id_to_coord, state["EA_s"], state["Opp_s"])
+        draw_analysis(ax_ana, state["Board"], state["EA_s"], state["Opp_s"], vtx_to_hex, state["EA_fitness"])
+        draw_legend(ax_leg)
+        draw_convergence(ax_conv, state["EA_stats"])
+        fig.canvas.draw_idle()
+
+    refresh()
+
+    def on_click(event):
+        if event.inaxes != ax_board or event.xdata is None:
+            return
+        # Manual placement — EA places first, then opponent
+        ea_done  = len(state["EA_s"])  >= MAX_SETTLEMENTS
+        opp_done = len(state["Opp_s"]) >= MAX_SETTLEMENTS
+        if ea_done and opp_done:
+            print("All settlements placed. Press 'c' to clear.")
+            return
+        all_placed = state["EA_s"] + state["Opp_s"]
+        turn = len(all_placed) % 2   # 0=EA, 1=opponent
+        v = nearest_vertex(event.xdata, event.ydata, id_to_coord)
+        if v is None:
+            return
+        if not is_valid(v, all_placed, vtx_to_hex, hex_to_vtx):
+            print(f"Vertex {v} is invalid (too close or already placed).")
+            return
+        if turn == 0 and not ea_done:
+            state["EA_s"].append(v)
+            print(f"EA placed at vertex {v}")
+        elif turn == 1 and not opp_done:
+            state["Opp_s"].append(v)
+            print(f"Opponent placed at vertex {v}")
+        refresh()
+
+    def on_key(event):
+        if event.key == 'r':
+            state["Board"] = generate_board()
+            if state["EA_weights"] is not None:
+                ea_s, opp_s = decode_competitive(state["EA_weights"], state["Board"],
+                                                 vtx_to_hex, hex_to_vtx, id_to_coord)
+                state["EA_s"], state["Opp_s"] = ea_s, opp_s
+                print("New board — EA strategy re-applied.")
+            else:
+                state["EA_s"], state["Opp_s"] = [], []
+                print("New board generated.")
+            refresh()
+
+        elif event.key == 'c':
+            state["EA_s"], state["Opp_s"] = [], []
+            print("Settlements cleared.")
+            refresh()
+
+        elif event.key == 'f':
+            _fitness_mode[0] = (_fitness_mode[0] + 1) % len(FITNESS_MODES)
+            print(f"Fitness mode → {current_fitness_mode()}")
+            refresh()
+
+        elif event.key == 'e':
+            mode = current_fitness_mode()
+            print(f"Running EA  ({EA_GENERATIONS} gen, pop {EA_POP_SIZE}, "
+                  f"{EA_NUM_BOARDS} boards, mode={mode})...")
+            best_weights, stats = run_ea(vtx_to_hex, hex_to_vtx, id_to_coord)
+
+            state["EA_weights"] = best_weights
+            state["EA_stats"]   = stats
+            state["EA_fitness"] = max(stats["best_per_gen"])
+
+            ea_s, opp_s = decode_competitive(best_weights, state["Board"],
+                                             vtx_to_hex, hex_to_vtx, id_to_coord)
+            state["EA_s"], state["Opp_s"] = ea_s, opp_s
+
+            w = best_weights
+            print(f"EA done | weights: pip_sum={w[0]:.3f}  max_pip={w[1]:.3f}  "
+                  f"count_high={w[2]:.3f}  num_hexes={w[3]:.3f}")
+            print(f"Best avg fitness ({mode}): {state['EA_fitness']:.3f}")
+            refresh()
+
+            # Show detailed results figure
+            show_results_figure(stats, best_weights, vtx_to_hex, hex_to_vtx, id_to_coord)
+
+    fig.canvas.mpl_connect("button_press_event", on_click)
+    fig.canvas.mpl_connect("key_press_event",    on_key)
+    plt.show()
+
+
 if __name__ == "__main__":
     main()
