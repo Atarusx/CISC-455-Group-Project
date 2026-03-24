@@ -13,6 +13,7 @@ Controls:
 
 import math
 import random
+import threading
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 
@@ -867,25 +868,36 @@ def main():
             refresh()
             
         elif event.key == 'e':
+            if state.get("_ea_running"):
+                print("EA is already running, please wait...")
+                return
             mode = current_fitness_mode()
             print(f"Running EA ({EA_GENERATIONS} gen, pop {EA_POP_SIZE}, "
                   f"{EA_NUM_BOARDS} boards, mode={mode})...")
-            best_weights, stats = run_ea(vtx_to_hex, hex_to_vtx, id_to_coord)
-            state["EA_weights"] = best_weights
-            state["EA_stats"] = stats
-            state["EA_fitness"] = max(stats["best_per_gen"])
-            
-            ea_s, opp_s = decode_competitive(best_weights, state["Board"], vtx_to_hex, hex_to_vtx, id_to_coord)
-            state["EA_s"], state["Opp_s"] = ea_s, opp_s
-            
-            w = best_weights
-            print(f"EA done | weights: pip_sum={w[0]:.3f} max_pip={w[1]:.3f} "
-                  f"count_high={w[2]:.3f} num_hexes={w[3]:.3f}")
-            print(f"Best avg fitness ({mode}): {state['EA_fitness']:.3f}")
-            refresh()
-            
-            # Show detailed results figure
-            show_results_figure(stats, best_weights, vtx_to_hex, hex_to_vtx, id_to_coord)
+            state["_ea_running"] = True
+
+            def ea_thread():
+                best_weights, stats = run_ea(vtx_to_hex, hex_to_vtx, id_to_coord)
+                state["EA_weights"] = best_weights
+                state["EA_stats"] = stats
+                state["EA_fitness"] = max(stats["best_per_gen"])
+                state["_ea_running"] = False
+
+                ea_s, opp_s = decode_competitive(best_weights, state["Board"], vtx_to_hex, hex_to_vtx, id_to_coord)
+                state["EA_s"], state["Opp_s"] = ea_s, opp_s
+
+                w = best_weights
+                print(f"\nEA done | weights: pip_sum={w[0]:.3f} max_pip={w[1]:.3f} "
+                      f"count_high={w[2]:.3f} num_hexes={w[3]:.3f}")
+                print(f"Best avg fitness ({mode}): {state['EA_fitness']:.3f}")
+                # Schedule GUI refresh on the main thread
+                fig.canvas.draw_idle()
+                refresh()
+                # Show detailed results figure
+                show_results_figure(stats, best_weights, vtx_to_hex, hex_to_vtx, id_to_coord)
+
+            t = threading.Thread(target=ea_thread, daemon=True)
+            t.start()
 
     fig.canvas.mpl_connect("button_press_event", on_click)
     fig.canvas.mpl_connect("key_press_event", on_key)
