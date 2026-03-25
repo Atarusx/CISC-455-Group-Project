@@ -572,6 +572,11 @@ def show_results_figure(stats, best_weights, vtx_to_hex, hex_to_vtx, id_to_coord
             transform=ax.transAxes, ha="center", va="top",
             color="black", fontsize=8)
 
+
+
+
+
+
     # 6. Best weight vector
     ax = axes[1, 2]
     style(ax, "Best Weight Vector", "Feature", "Weight value")
@@ -769,13 +774,18 @@ def nearest_vertex(cx, cy, id_to_coord):
 def main():
     state = {
         "Board"      : generate_board(),
-        "EA_s"       : [],    # EA settlements
-        "Opp_s"      : [],    # opponent settlements
+        "EA_s"       : [],
+        "Opp_s"      : [],
         "EA_weights" : None,
         "EA_stats"   : None,
         "EA_fitness" : None,
         "Manual_opponent_active" : False,
-        "EA_first" : None
+        "EA_first" : None,
+        "Human_session_active"   : False,   # True while 30-board session is running
+        "Human_session_boards"   : [],      # list of 30 pre-generated boards
+        "Human_session_index"    : 0,       # which board we are on (0-29)
+        "Human_pip_scores"       : [],      # human pip total per board
+        "EA_pip_scores_session"  : [],      # EA pip total per board (same boards)
     }
 
     vtx_to_hex, hex_to_vtx, id_to_coord = generate_vertex_map()
@@ -826,9 +836,128 @@ def main():
                 print(f"EA placed at vertex {v}")
                 return
 
+    def show_human_vs_ea_chart():
+        """Show a box plot comparing human pip scores vs EA pip scores across the 30-board session."""
+        human_scores = state["Human_pip_scores"]
+        ea_scores    = state["EA_pip_scores_session"]
+
+        fig_results, ax_results = plt.subplots(figsize=(7, 5), facecolor="white")
+        fig_results.suptitle(
+            f"Human vs EA — {len(human_scores)} board session",
+            fontsize=13, fontweight="bold", color="black"
+        )
+
+        box_plot = ax_results.boxplot(
+            [ea_scores, human_scores],
+            labels=["EA", "You (Human)"],
+            patch_artist=True,
+            medianprops=dict(color="black", linewidth=2)
+        )
+        box_plot["boxes"][0].set_facecolor("#5b8cff")
+        box_plot["boxes"][1].set_facecolor("#f43c45")
+        for element in ["whiskers", "caps", "fliers"]:
+            for item in box_plot[element]:
+                item.set_color("black")
+
+        ea_mean    = sum(ea_scores)    / len(ea_scores)
+        human_mean = sum(human_scores) / len(human_scores)
+
+        ax_results.text(
+            0.5, 0.95,
+            f"EA mean = {ea_mean:.1f}     You mean = {human_mean:.1f}",
+            transform=ax_results.transAxes,
+            ha="center", va="top", fontsize=10, color="black"
+        )
+        ax_results.set_ylabel("Total pip score", fontsize=10)
+        ax_results.set_facecolor("white")
+        ax_results.tick_params(colors="black")
+        for spine in ax_results.spines.values():
+            spine.set_edgecolor("#aaaaaa")
+
+        plt.tight_layout()
+        plt.show()
+
+    def start_human_session():
+        """Begin a 30-board human vs EA session."""
+        if state["EA_weights"] is None:
+            print("Run the EA first with 'e' before starting a human session.")
+            return
+
+        number_of_session_boards = 30
+        state["Human_session_boards"]  = [generate_board() for _ in range(number_of_session_boards)]
+        state["Human_session_index"]   = 0
+        state["Human_pip_scores"]      = []
+        state["EA_pip_scores_session"] = []
+        state["Human_session_active"]  = True
+
+        # Pre-compute EA score for every board using the evolved weights
+        for session_board in state["Human_session_boards"]:
+            ea_s, _ = decode_competitive(
+                state["EA_weights"], session_board, vtx_to_hex, hex_to_vtx, id_to_coord
+            )
+            _, ea_pips, _ = settlement_analysis(ea_s, session_board, vtx_to_hex)
+            state["EA_pip_scores_session"].append(ea_pips)
+
+        # Load the first board
+        state["Board"]  = state["Human_session_boards"][0]
+        state["EA_s"]   = []
+        state["Opp_s"]  = []
+        state["EA_first"] = False   # Human always places first in session mode
+        print(f"Human session started — place your {MAX_SETTLEMENTS} settlements on each of the {number_of_session_boards} boards.")
+        print("Board 1 / 30")
+        refresh()
+
+    def advance_human_session():
+        """Record score for current board and move to the next, or end the session."""
+        _, human_pips, _ = settlement_analysis(state["Opp_s"], state["Board"], vtx_to_hex)
+        state["Human_pip_scores"].append(human_pips)
+
+        board_number = state["Human_session_index"] + 1
+        ea_pips_this_board = state["EA_pip_scores_session"][state["Human_session_index"]]
+        print(f"Board {board_number}: You = {human_pips} pips  |  EA = {ea_pips_this_board} pips")
+
+        state["Human_session_index"] += 1
+
+        # Check if session is complete
+        if state["Human_session_index"] >= len(state["Human_session_boards"]):
+            state["Human_session_active"] = False
+            print("Session complete! Showing results...")
+            show_human_vs_ea_chart()
+            return
+
+        # Load the next board
+        state["Board"]  = state["Human_session_boards"][state["Human_session_index"]]
+        state["EA_s"]   = []
+        state["Opp_s"]  = []
+        print(f"Board {state['Human_session_index'] + 1} / {len(state['Human_session_boards'])}")
+        refresh()
+
+
     def on_click(event):
 
         if event.inaxes != ax_board or event.xdata is None:
+            return
+
+        # ── Human session mode (30-board comparison) ──────────────────────
+        if state["Human_session_active"]:
+            if len(state["Opp_s"]) >= MAX_SETTLEMENTS:
+                return   # Already placed all settlements for this board
+
+            all_placed = state["EA_s"] + state["Opp_s"]
+            nearest = nearest_vertex(event.xdata, event.ydata, id_to_coord)
+            if nearest is None:
+                return
+            if not is_valid(nearest, all_placed, vtx_to_hex, hex_to_vtx):
+                print("Invalid placement — too close to another settlement.")
+                return
+
+            state["Opp_s"].append(nearest)
+            print(f"You placed at vertex {nearest}  ({len(state['Opp_s'])} / {MAX_SETTLEMENTS})")
+            refresh()
+
+            # Once human has placed all settlements, record and advance
+            if len(state["Opp_s"]) >= MAX_SETTLEMENTS:
+                advance_human_session()
             return
 
         if not state["Manual_opponent_active"]:
@@ -952,6 +1081,9 @@ def main():
             refresh()
 
             show_results_figure(stats, state["EA_weights"], vtx_to_hex, hex_to_vtx, id_to_coord)
+
+        elif event.key == 'h':
+            start_human_session()
 
 
 
